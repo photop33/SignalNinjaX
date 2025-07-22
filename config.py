@@ -33,7 +33,6 @@ RUN_PARAMS = [
 
 ]
 
-
 ACTIVE_STRATEGIES = [
     "strategy_adx_ema_breakout_atr"
 ]
