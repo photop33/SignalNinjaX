@@ -11,7 +11,7 @@ PCT_CHANGE_THRESHOLD = 0.00
 MIN_VOLUME = 0
 FILTER_MODE = "OR"
 
-
+print("YONA HA MELLECHHHHH")
 symbol = ["BTCUSDT"]
 interval = "4h"
 start_time_str = "2017-07-1 00:00"
