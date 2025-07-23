@@ -1,4 +1,3 @@
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import requests
@@ -9,7 +8,7 @@ import pandas as pd
 from datetime import timedelta
 from indector import add_indicators
 from config import symbol_scan
-from config import VOLATILITY_THRESHOLD, PCT_CHANGE_THRESHOLD, MIN_VOLUME, FILTER_MODE
+from config import  PCT_CHANGE_THRESHOLD, FILTER_MODE
 import sys
 import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
