@@ -32,4 +32,3 @@ RUN_PARAMS = [
      {"sl_multiplier": 2,   "rr_ratio": 1.2, "volatility_min": 600, "volatility_max": 675},# 90 אחוז
 
 ]
-
