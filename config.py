@@ -33,9 +33,3 @@ RUN_PARAMS = [
 
 ]
 
-ACTIVE_STRATEGIES = [
-    "strategy_adx_ema_breakout_atr"
-]
-STRATEGY_THRESHOLDS = {
-    "strategy_adx_ema_breakout_atr": 6
-}
