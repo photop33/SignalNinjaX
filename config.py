@@ -32,10 +32,3 @@ RUN_PARAMS = [
      {"sl_multiplier": 2,   "rr_ratio": 1.2, "volatility_min": 600, "volatility_max": 675},# 90 אחוז
 
 ]
-
-ACTIVE_STRATEGIES = [
-    "strategy_adx_ema_breakout_atr"
-]
-STRATEGY_THRESHOLDS = {
-    "strategy_adx_ema_breakout_atr": 6
-}

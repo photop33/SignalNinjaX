@@ -112,3 +112,31 @@ def add_indicators(df: pd.DataFrame, wma_window=14) -> pd.DataFrame:
         print(f"⚠️ Bollinger שגיאה: {e}")
 
     return df
+import numpy as np
+
+def compute_adx_tradingview(df, di_len=14, adx_smooth=25):
+    df = df.copy()
+
+    df["tr"] = np.maximum(df["high"] - df["low"],
+                          np.maximum(abs(df["high"] - df["close"].shift(1)),
+                                     abs(df["low"] - df["close"].shift(1))))
+
+    df["+dm"] = np.where((df["high"] - df["high"].shift(1) > df["low"].shift(1) - df["low"]) &
+                         (df["high"] - df["high"].shift(1) > 0),
+                         df["high"] - df["high"].shift(1), 0)
+
+    df["-dm"] = np.where((df["low"].shift(1) - df["low"] > df["high"] - df["high"].shift(1)) &
+                         (df["low"].shift(1) - df["low"] > 0),
+                         df["low"].shift(1) - df["low"], 0)
+
+    tr_smooth = df["tr"].rolling(window=di_len).sum()
+    plus_dm_smooth = df["+dm"].rolling(window=di_len).sum()
+    minus_dm_smooth = df["-dm"].rolling(window=di_len).sum()
+
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+
+    adx = dx.rolling(window=adx_smooth).mean()
+
+    return adx
