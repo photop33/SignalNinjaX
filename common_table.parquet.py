@@ -1,13 +1,32 @@
 import pandas as pd
 import hashlib
+import time
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 
-# ===== שלב 1: טען קובץ אסטרטגיה =====
-print("📥 טוען קובץ אסטרטגיה...")
-df = pd.read_parquet("strategy.parquet")  # או CSV
+# ========= הגדרות =========
+NUM_WORKERS = multiprocessing.cpu_count()
 
+# ========= פונקציות =========
+def log_time(stage_name, start_time):
+    duration = time.perf_counter() - start_time
+    print(f"⏱️ {stage_name} הסתיים תוך {duration:.2f} שניות.\n")
+
+def hash_row_time(row_tuple):
+    return hashlib.md5(str(row_tuple).encode()).hexdigest()[:10]
+
+def hash_row_combo(row_tuple):
+    return hashlib.md5(str(row_tuple).encode()).hexdigest()[:10]
+
+# ========= שלב 1: טען קובץ =========
+print("📥 שלב 1: טוען קובץ אסטרטגיה...")
+start = time.perf_counter()
+df = pd.read_parquet("strategy.parquet")
 print("📋 עמודות שנמצאו:", df.columns.tolist())
+log_time("טעינת הקובץ", start)
 
-# ===== שלב 2: הגדר עמודות מבוקשות =====
+# ========= שלב 2: עמודות =========
 wanted_common_columns = [
     'time', 'open', 'high', 'low', 'close', 'volume',
     'rsi', 'macd', 'macd_signal', 'macd_diff', 'ADX',
@@ -25,45 +44,58 @@ combo_columns = [
     'atr_mult', 'volume_window', 'lookback_breakout'
 ]
 
-# ===== שלב 3: ודא שכל עמודות ה־common קיימות גם אם ריקות =====
-for col in wanted_common_columns:
+# ========= שלב 3: ודא עמודות =========
+print("🧩 שלב 2: בודק עמודות חסרות...")
+start = time.perf_counter()
+for col in tqdm(wanted_common_columns, desc="בודק עמודות"):
     if col not in df.columns:
         print(f"➕ מוסיף עמודה חסרה: {col}")
         df[col] = pd.NA
+log_time("בדיקת עמודות חסרות", start)
 
-# ===== הוספת עמודת symbol עם ערך קבוע לכל שורה =====
+# ========= שלב 4: טבלת Common =========
+print("🔍 שלב 3: בונה טבלת Common...")
+start = time.perf_counter()
 df["symbol"] = "BTCUSDT"
-
-# ===== שלב 4: יצירת טבלת COMMON עם מזהה ייחודי לכל time+symbol =====
-def hash_time_row(row):
-    return hashlib.md5(str(tuple(row)).encode()).hexdigest()[:10]
-
-print("🔍 בונה טבלת Common לפי זמן...")
 common_df = df[wanted_common_columns + ["symbol"]].drop_duplicates().copy()
-common_df["common_id"] = common_df.apply(hash_time_row, axis=1)
 
-# טבלת common מוכנה
+print("🧠 מחשב common_id עם ריבוי ליבות...")
+rows = common_df[wanted_common_columns + ["symbol"]].itertuples(index=False, name=None)
+with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+    common_ids = list(tqdm(executor.map(hash_row_time, rows), total=len(common_df), desc="🔢 common_id"))
+
+common_df["common_id"] = common_ids
 common_table = common_df[["common_id", "symbol"] + wanted_common_columns]
+log_time("יצירת טבלת Common", start)
 
-# ===== שלב 5: קישור זמני סיגנל ל־common_id =====
-print("🔗 קושר כל שורת אסטרטגיה לפי זמן ל־common_id...")
+# ========= שלב 5: קישור common_id לפי time =========
+print("🔗 שלב 4: קישור common_id לפי זמן...")
+start = time.perf_counter()
 time_to_common_id = dict(zip(common_df["time"], common_df["common_id"]))
 df["common_id"] = df["time"].map(time_to_common_id)
+log_time("קישור common_id", start)
 
-# ===== שלב 6: יצירת מזהה קומבינציה =====
-def hash_combo_row(row):
-    values = tuple(row[col] for col in combo_columns + ["common_id"])
-    return hashlib.md5(str(values).encode()).hexdigest()[:10]
+# ========= שלב 6: טבלת קומבינציות =========
+print("🧮 שלב 5: בונה טבלת קומבינציות...")
+start = time.perf_counter()
+combo_df = df[combo_columns + ["common_id"]].drop_duplicates().copy()
 
-combo_df = df[combo_columns + ["common_id"]].copy()
-combo_df["combo_id"] = combo_df.apply(hash_combo_row, axis=1)
-combo_df = combo_df.drop_duplicates()
+print("🧠 מחשב combo_id עם ריבוי ליבות...")
+combo_rows = combo_df[combo_columns + ["common_id"]].itertuples(index=False, name=None)
+with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+    combo_ids = list(tqdm(executor.map(hash_row_combo, combo_rows), total=len(combo_df), desc="🔐 combo_id"))
 
-# ===== שלב 7: שמירת קבצים =====
-print("💾 שומר קבצים...")
+combo_df["combo_id"] = combo_ids
+log_time("יצירת טבלת קומבינציות", start)
+
+# ========= שלב 7: שמירה =========
+print("💾 שלב 6: שומר קבצים...")
+start = time.perf_counter()
 common_table.to_parquet("common_table.parquet", index=False)
 combo_df.to_parquet("combinations_table.parquet", index=False)
+log_time("שמירת קבצים", start)
 
+# ========= סיום =========
 print("✅ הסתיים בהצלחה:")
 print(" - common_table.parquet")
 print(" - combinations_table.parquet")
