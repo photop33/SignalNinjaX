@@ -1,13 +1,16 @@
 import os
+import sys
+
 import pandas as pd
 import numpy as np
 import polars as pl
 from itertools import product
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from time import perf_counter
 from config import INDICATOR_CONDITIONS, RUN_PARAMS, symbol, start_time_str, end_time_str
-
+import multiprocessing
+#
 # ==== הגדרות כלליות ====
 ind_params = INDICATOR_CONDITIONS["strategy_adx_ema_breakout_atr"]
 symbols = symbol if isinstance(symbol, list) else [symbol]
@@ -15,6 +18,7 @@ start_time = pd.to_datetime(start_time_str)
 end_time = pd.to_datetime(end_time_str)
 TEMP_DIR = r"C:\Users\LiorSw\data\strategy_chunks"
 os.makedirs(TEMP_DIR, exist_ok=True)
+OUTPUT_FILE= "strategy.parquet"
 
 # ==== מדידת זמן כולל ====
 total_start = perf_counter()
@@ -92,35 +96,107 @@ def process_combo(i_combo):
             return None
 
         for k, v in combo.items():
-            dft[k] = v
+          dft[k] = v
 
-        dft.to_csv(os.path.join(TEMP_DIR, f"chunk_{i}.csv"), index=False)
+        dft.to_parquet(os.path.join(TEMP_DIR, f"chunk_{i}.parquet"))
         return 1
     except Exception as e:
         print(f"❌ שגיאה בקומבו {i}: {e}")
         return 0
 
+REQUIRED_COLUMNS = [
+    "ADX", "ADX_min", "PnL_%", "SL", "TP", "atr_mult", "atr_window",
+    "bb_lower", "bb_middle", "bb_upper", "bb_width", "cci", "close",
+    "common_id", "cross_line_time", "ema_long", "ema_long_window",
+    "ema_short", "ema_short_window", "high", "high_prev", "lookback_breakout",
+    "low", "macd", "macd_diff", "macd_signal", "open", "parabolic_sar",
+    "reasons", "result", "rr_ratio", "rsi", "score", "sl_multiplier",
+    "symbol", "time", "trix", "volatility", "volatility_max", "volatility_min",
+    "volume", "volume_ma", "volume_window", "vwap", "wma"
+]
+
+
+LOG_FILE = "parquet_read_errors.log"
+
+def read_parquet_file(path, selected_cols):
+    try:
+        df = pl.read_parquet(path)
+        available_cols = [col for col in selected_cols if col in df.columns]
+
+        if not available_cols:
+            log_message = f"{path} ⚠️ אין עמודות תואמות – דילוג"
+        else:
+            log_message = f"{path} ✅ נטען בהצלחה ({len(available_cols)} עמודות)"
+
+        with open(LOG_FILE, "a", encoding="utf-8") as log:
+            log.write(log_message + "\n")
+
+        if not available_cols:
+            return None
+
+        return df.select(available_cols)
+    except Exception as e:
+        error_message = f"{path} ❌ שגיאה: {e}"
+        print(error_message)
+        with open(LOG_FILE, "a", encoding="utf-8") as log:
+            log.write(error_message + "\n")
+        return None
+
+def read_parquet_file(path, selected_cols):
+    try:
+        df = pl.read_parquet(path)
+        available_cols = [col for col in selected_cols if col in df.columns]
+        log_message = f"{path} ✅ נטען בהצלחה ({len(available_cols)} עמודות)"
+        with open(LOG_FILE, "a", encoding="utf-8") as log:
+            log.write(log_message + "\n")
+        return df.select(available_cols)
+    except Exception as e:
+        error_message = f"{path} ❌ שגיאה: {e}"
+        print(error_message)
+        with open(LOG_FILE, "a", encoding="utf-8") as log:
+            log.write(error_message + "\n")
+        return None
+
+def parallel_read_parquet(chunk_files, selected_cols):
+    df_list = []
+    with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+        futures = {
+            executor.submit(read_parquet_file, path, selected_cols): path
+            for path in chunk_files
+        }
+        for f in tqdm(as_completed(futures), total=len(futures), desc="📄 טוען קבצים"):
+            result = f.result()
+            if result is not None:
+                df_list.append(result)
+    return df_list
+
+
 def main():
+    if os.path.exists(LOG_FILE):
+        os.remove(LOG_FILE)
     print(f"🚀 שלב 3: מריץ {len(all_run_combos)} קומבינציות עם multiprocessing...")
     saved = 0
     with ProcessPoolExecutor() as executor:
         for res in tqdm(executor.map(process_combo, enumerate(all_run_combos)), total=len(all_run_combos), desc="🔍 וקטוריזציה"):
             saved += res
+    total_start = perf_counter()
 
     print("🧠 שלב 4: איחוד כל הקבצים עם Polars...")
-    chunk_files = [os.path.join(TEMP_DIR, f) for f in os.listdir(TEMP_DIR) if f.endswith(".csv")]
-    df_list = []
-    for f in tqdm(chunk_files, desc="📄 טוען קבצים"):
-        df_list.append(pl.read_csv(f))
+    chunk_files = [os.path.join(TEMP_DIR, f) for f in os.listdir(TEMP_DIR) if f.endswith(".parquet")]
+    df_list = parallel_read_parquet(chunk_files, REQUIRED_COLUMNS)
 
-    final_df = pl.concat(df_list)
+    if not df_list:
+        print("❌ לא נטענו קבצים — אין מה לאחד.")
+        return
 
-    print("💾 שלב 5: כותב לקובץ startegy.parquet...")
-    final_df.write_parquet("startegy.parquet")
+    final_df = pl.concat(df_list, how="vertical_relaxed")
+    print("💾 שלב 5: כותב לקובץ strategy.parquet...")
+    final_df.write_parquet(OUTPUT_FILE)
 
     total_end = perf_counter()
-    print(f"✅ הסתיים — startegy.parquet מוכן | ⏱️ זמן כולל: {total_end - total_start:.2f} שניות")
-    print(f"📊 סך הכול קומבינציות שנשמרו: {saved}")
+    print(f"✅ הסתיים — {OUTPUT_FILE} מוכן | ⏱️ זמן כולל: {total_end - total_start:.2f} שניות")
+   # print(f"📊 קומבינציות שנשמרו: {saved}")
+
 
 if __name__ == "__main__":
     main()
