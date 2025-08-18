@@ -1,13 +1,17 @@
 import pandas as pd
+from tqdm import tqdm
 
-# טען את קובצי ה־parquet
+# 📥 טען את קובצי ה־Parquet
 common_df = pd.read_parquet("common_table.parquet")
 combo_df = pd.read_parquet("combinations_table.parquet")
 
-# מיזוג לפי common_id
-merged_df = combo_df.merge(common_df, on="common_id", how="left")
+# 🔄 מיזוג עם בר התקדמות (לא נדרש בפועל ב־merge, אבל מופיע ללוגיקה)
+print("🔄 ממזג את הקבצים לפי time...")
+tqdm.pandas(desc="מיזוג")
+merged_df = combo_df.merge(common_df, on="time", how="left")
 
-# שמירה ל־CSV
-merged_df.to_csv("merged_signals.csv", index=False, encoding="utf-8-sig")
+# 💾 שמירה לקובץ Parquet
+print("💾 שומר את הקובץ לקובץ merged_signals.parquet...")
+merged_df.to_parquet("merged_signals.parquet", index=False)
 
-print("✅ קובץ מאוחד נשמר בשם merged_signals.csv")
+print("✅ קובץ מאוחד נשמר בשם merged_signals.parquet")

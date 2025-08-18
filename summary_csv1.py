@@ -1,196 +1,157 @@
-import polars as pl
+import os
 import pandas as pd
 import numpy as np
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from itertools import product
 from tqdm import tqdm
-import os
-import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from time import perf_counter
+from config import INDICATOR_CONDITIONS, RUN_PARAMS, symbol, start_time_str, end_time_str
 
-# ---- הגדרות כלליות ----
-condition_cols = [
-    "ema_short_window", "ema_long_window", "ADX_min", "atr_window", "atr_mult",
-    "volume_window", "lookback_breakout", "sl_multiplier", "rr_ratio",
-    "volatility_min", "volatility_max"
+# ==== הגדרות כלליות ====
+ind_params = INDICATOR_CONDITIONS["strategy_adx_ema_breakout_atr"]
+symbols = symbol if isinstance(symbol, list) else [symbol]
+start_time = pd.to_datetime(start_time_str)
+end_time = pd.to_datetime(end_time_str)
+TEMP_DIR = r"C:\Users\LiorSw\data\strategy_chunks"
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# ==== הגדרות עמודות צפויות ====
+expected_columns = [
+    'symbol', 'time', 'open', 'high', 'low', 'close', 'volume', 'rsi', 'macd',
+    'macd_signal', 'macd_diff', 'ADX', 'ema_short', 'ema_long', 'bb_width', 'volatility', 'atr',
+    'cci', 'parabolic_sar', 'vwap', 'wma', 'trix', 'bb_upper', 'bb_middle', 'bb_lower', 'score', 'reasons', 'volume_ma',
+    'high_prev', 'SL', 'TP', 'sl_multiplier', 'rr_ratio', 'volatility_min', 'volatility_max',
+    'cross_line_time', 'result', 'PnL_%'
 ]
-indicators = [
-    'volume', 'rsi', 'macd', 'macd_signal', 'macd_diff', 'ema_short', 'ema_long', 'bb_width',
-    'atr', 'cci', 'parabolic_sar', 'vwap', 'wma', 'trix', 'bb_upper', 'bb_middle', 'bb_lower',
-    'ema_7', 'ema_9', 'ema_10', 'ema_12', 'ema_13', 'ema_14', 'ema_21', 'ema_25', 'ema_26',
-    'ema_30', 'ema_50', 'atr_14', 'atr_10', 'atr_20', 'atr_7', 'adx_18', 'adx_20', 'adx_22',
-    'adx_25', 'adx_30', 'vol_ma_20', 'vol_ma_30', 'vol_ma_14', 'vol_ma_10', 'vol_ma_50',
-    'high_prev_5', 'high_prev_10', 'high_prev_14', 'high_prev_20'
+import pyarrow.parquet as pq
+print("📥 שלב 1: קורא את הסכימה של merged_signals.parquet...")
+
+# ==== יצירת קומבינציות ====
+print("⚙️ שלב 2: יוצר קומבינציות...")
+param_names = list(ind_params.keys())
+param_values = [ind_params[k] for k in param_names]
+combos = list(product(*param_values))
+all_run_combos = [
+    {**dict(zip(param_names, combo)), **run_cfg}
+    for run_cfg in RUN_PARAMS
+    for combo in combos
 ]
 
+# ==== פונקציה לעיבוד קומבו ====
+def process_combo(i_combo):
+    import pandas as pd
+    import numpy as np
+    import pyarrow.parquet as pq
 
-# ---- שלב 1: POLARS SUMMARY ----
-def run_polars_summary():
-    if os.path.exists("signals_summary_by_conditions.csv"):
-        print("📄 קובץ summary כבר קיים – מדלג על שלב 1.")
-        return
+    i, combo = i_combo
+    try:
+        all_columns = set(pq.read_schema("merged_signals.parquet").names)
+        ema_short = combo["ema_short_window"]
+        ema_long = combo["ema_long_window"]
+        adx_min = combo["ADX_min"]
+        atr_window = combo["atr_window"]
+        atr_mult = combo["atr_mult"]
+        rr_ratio = combo["rr_ratio"]
+        volume_window = combo["volume_window"]
+        lookback_breakout = combo["lookback_breakout"]
+        high_prev_col = f"high_prev_{lookback_breakout}"
 
-    start_polars = time.perf_counter()
-    print("שלב 1: מריץ Polars Summary...")
+        requested_cols = [
+            "time", "open", "high", "low", "close", "volume",
+            "rsi", "macd", "macd_signal", "macd_diff", "ADX",
 
-    # קריאת שמות עמודות עם pandas
-    with open("tpsl_result.csv", encoding="utf-8-sig") as f:
-        first_line = f.readline().strip()
-        columns = [col.strip() for col in first_line.split(",")]
+            "bb_width", "volatility", "cci",
+            "parabolic_sar", "vwap", "wma", "trix", "bb_upper",
+            "bb_middle", "bb_lower"
 
-    # קריאה עם polars
-    df = pl.read_csv("tpsl_result.csv", has_header=True, new_columns=columns)
-    df = df.rename({col: col.strip().replace('\r', '').replace('\n', '') for col in df.columns})
 
-    # ניקוי ערכים ו-type casting
-    for col in indicators + condition_cols + ["PnL_%"]:
-        if col in df.columns and df[col].dtype == pl.Utf8:
-            df = df.with_columns(
-                pl.col(col).str.replace_all(r"\r|\n", "").cast(pl.Float64, strict=False)
-            )
-
-    # חישובי סיכום
-    agg_exprs = []
-    for ind in indicators:
-        agg_exprs += [
-            pl.col(ind).max().alias(f"{ind}_max"),
-            pl.col(ind).min().alias(f"{ind}_min"),
-            pl.col(ind).mean().alias(f"{ind}_avg"),
-            pl.col(ind).var().alias(f"{ind}_var"),
         ]
-    agg_exprs += [
-        pl.col("PnL_%").count().alias("Num_Trades"),
-        pl.col("PnL_%").sum().alias("Total_PnL_Percent"),
-        pl.col("PnL_%").max().alias("Max_PnL_Percent"),
-        pl.col("PnL_%").min().alias("Min_PnL_Percent"),
-        (pl.col("PnL_%") > 0).sum().alias("TP_Hit_Count"),
-        (pl.col("PnL_%") < 0).sum().alias("SL_Hit_Count"),
-        ((pl.col("PnL_%") > 0).sum() / pl.col("PnL_%").count()).alias("TP_Hit_Percent"),
-        ((pl.col("PnL_%") < 0).sum() / pl.col("PnL_%").count()).alias("SL_Hit_Percent"),
-    ]
 
-    summary = df.group_by(condition_cols).agg(agg_exprs)
-    summary.write_csv("signals_summary_by_conditions.csv")
-    end_polars = time.perf_counter()
-    print("✅ סיכום ביניים נשמר ל-signals_summary_by_conditions.csv")
-    print(f"⏱ סיום שלב 1: לקח {end_polars - start_polars:.1f} שניות")
+        cols = [col for col in requested_cols if col in all_columns]
 
+        missing = [col for col in requested_cols if col not in all_columns]
+        if missing:
+            print(f"⚠️ קומבו {i}: עמודות חסרות: {missing}")
+            return 0
 
-# ---- שלב 2: MULTIPROCESSING CALCULATIONS ----
-def profit_factor(pnl): return pnl[pnl > 0].sum() / abs(pnl[pnl < 0].sum()) if any(pnl < 0) else np.nan
-def sharpe_ratio(pnl): return pnl.mean() / pnl.std() if pnl.std() > 0 else np.nan
-def max_drawdown(pnl): return (pd.Series(pnl).cumsum().cummax() - pd.Series(pnl).cumsum()).max()
-def max_consecutive_losses(pnl):
-    max_streak = streak = 0
-    for val in pnl:
-        if val < 0: streak += 1; max_streak = max(max_streak, streak)
-        else: streak = 0
-    return max_streak
-def win_streak(pnl):
-    max_streak = streak = 0
-    for val in pnl:
-        if val > 0: streak += 1; max_streak = max(max_streak, streak)
-        else: streak = 0
-    return max_streak
-def percent_outliers(pnl):
-    std = pnl.std(); mean = pnl.mean()
-    return np.sum(np.abs(pnl - mean) > 3 * std) / len(pnl) if len(pnl) else 0
-def trade_distribution(times):
-    hours = pd.to_datetime(times).dt.hour
-    return ', '.join([f"{h}:{c}" for h, c in hours.value_counts().sort_index().items()])
-def trade_distribution_days(times):
-    days = pd.to_datetime(times).dt.dayofweek.map({0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7})
-    return ', '.join([f"{d}:{c}" for d, c in days.value_counts().sort_index().items()])
-def max_min_exposure(entries, exits):
-    events = pd.DataFrame({
-        'time': pd.concat([pd.to_datetime(entries), pd.to_datetime(exits)]),
-        'type': ['entry'] * len(entries) + ['exit'] * len(exits)
-    }).sort_values('time')
-    current = max_e = min_e = 0
-    exposures = []
-    for _, row in events.iterrows():
-        current += 1 if row['type'] == 'entry' else -1
-        exposures.append(current)
-    return {'MAX_Exposure': max(exposures), 'MIN_Exposure': min(exposures)}
+        df = pd.read_parquet("merged_signals.parquet", columns=cols)
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        df = df[(df["time"] >= start_time) & (df["time"] <= end_time)]
 
-def process_group(idx_row, condition_cols, pnl_col, chunk_size=200000):
-    idx, row = idx_row
-    all_pnls, all_tp, all_sl, all_times, all_cross_times = [], [], [], [], []
+        if df.empty:
+            return 0
+        df["ema_short"] = df.get(f"ema_{ema_short}")
+        df["ema_long"] = df.get(f"ema_{ema_long}")
+        df["ADX"] = df.get(f"adx_{atr_window}_{adx_min}")
+        df["atr"] = df.get(f"atr_{atr_window}")
+        df["volume_ma"] = df.get(f"vol_ma_{volume_window}")
+        df["high_prev"] = df.get(high_prev_col)
 
-    for chunk in pd.read_csv('tpsl_result.csv', chunksize=chunk_size, low_memory=False):
-        chunk.columns = chunk.columns.str.strip().str.replace(r'[\r\n]', '', regex=True)
-        for col in condition_cols + [pnl_col]:
-            if col in chunk.columns:
-                chunk[col] = pd.to_numeric(chunk[col], errors='coerce')
+        # טיפולים לערכים חסרים
+        df["ema_short"] = pd.to_numeric(df["ema_short"], errors="coerce")
+        df["ema_long"] = pd.to_numeric(df["ema_long"], errors="coerce")
+        df["ADX"] = pd.to_numeric(df["ADX"], errors="coerce")
+        df["volume_ma"] = pd.to_numeric(df["volume_ma"], errors="coerce")
+        df["high_prev"] = pd.to_numeric(df["high_prev"], errors="coerce")
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
 
-        filt = np.all([chunk[col] == row[col] for col in condition_cols if col in chunk.columns], axis=0)
-        group = chunk[filt]
-        if group.empty: continue
+        # סינון שורות עם ערכים חסרים לפני חישוב score
+        df = df.dropna(subset=["ema_short", "ema_long", "ADX", "volume_ma", "high_prev", "close", "volume"])
 
-        all_pnls.extend(group[pnl_col].astype(float).tolist())
-        all_tp.extend(group[group[pnl_col] > 0][pnl_col].astype(float).tolist())
-        all_sl.extend(group[group[pnl_col] < 0][pnl_col].astype(float).tolist())
-        all_times.extend(pd.to_datetime(group['time'], errors='coerce').dropna().tolist())
-        all_cross_times.extend(pd.to_datetime(group['cross_line_time'], errors='coerce').dropna().tolist())
+        # חישוב ציון
+        df["score"] = (
+                (df["close"] > df["ema_long"]).astype(int) +
+                (df["ema_short"] > df["ema_long"]).astype(int) +
+                (df["ADX"] > adx_min).astype(int) +
+                (df["volume"] > df["volume_ma"]).astype(int) +
+                2 * (df["close"] > df["high_prev"]).astype(int)
+        )
 
-    if not all_pnls: return idx, {}
+        min_len = max([ema_long, atr_window, volume_window, lookback_breakout]) + 2
+        df = df.iloc[min_len:]
+        df = df[df["score"] >= 6]
 
-    pnl = np.array(all_pnls)
-    result = {
-        'Hour_Trade': trade_distribution(all_times),
-        'Days_Trade': trade_distribution_days(all_times),
-        'Pnl_TP_per_deal': np.mean(all_tp) if all_tp else np.nan,
-        'Pnl_SL_per_deal': np.mean(all_sl) if all_sl else np.nan,
-        'Max_Drawdown': max_drawdown(pnl),
-        'Max_Consecutive_Losses': max_consecutive_losses(pnl),
-        'Win_Streaks': win_streak(pnl),
-        '%_Outliers': percent_outliers(pnl) * 100,
-        'Expectancy': (np.mean(all_tp) if all_tp else 0) * (len(all_tp)/len(pnl)) +
-                      (np.mean(all_sl) if all_sl else 0) * (len(all_sl)/len(pnl)) if len(pnl) else np.nan,
-        'Profit_Factor': profit_factor(pnl),
-        'Sharpe_Ratio': sharpe_ratio(pnl)
-    }
+        if df.empty:
+            return 0
 
-    if all_times and all_cross_times:
-        durations = (pd.Series(all_cross_times) - pd.Series(all_times)).dt.total_seconds() / 3600
-        result['Avg_Trade_Duration_hours'] = durations.mean()
-        result.update(max_min_exposure(all_times, all_cross_times))
+        for k, v in combo.items():
+            df[k] = v
 
-    return idx, result
+        for col in expected_columns:
+            if col not in df.columns:
+                df[col] = pd.NA
 
+        df["symbol"] = "BTCUSDT"
+        df = df[sorted(df.columns)]
+        df.to_parquet(os.path.join(TEMP_DIR, f"chunk_{i}.parquet"), index=False)
+        print(f"✅ קומבו {i} נשמר כ- chunk_{i}.parquet")
+        return 1
+    except Exception as e:
+        print(f"❌ שגיאה בקומבו {i}: {e}")
+        return 0
 
-# ---- MAIN ----
+# ==== הפונקציה הראשית ====
+def main():
+    total_start = perf_counter()
+    print(f"🚀 שלב 3: מריץ {len(all_run_combos)} קומבינציות עם multiprocessing...")
+
+    saved = 0
+    with ProcessPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(process_combo, item) for item in enumerate(all_run_combos)]
+        for f in tqdm(as_completed(futures), total=len(futures), desc="🔍 וקטוריזציה"):
+            saved += f.result()
+
+    print("🧠 שלב 4: איחוד כל הקבצים עם pandas...")
+    chunk_files = [os.path.join(TEMP_DIR, f) for f in os.listdir(TEMP_DIR) if f.endswith(".parquet")]
+    df_list = [pd.read_parquet(f) for f in tqdm(chunk_files, desc="📄 טוען קבצים")]
+    final_df = pd.concat(df_list, ignore_index=True)
+
+    print(f"💾 שלב 5: כותב לקובץ summary.csv...")
+    final_df.to_csv("summary.csv", index=False, encoding="utf-8-sig")
+
+    total_end = perf_counter()
+    print(f"✅ הסתיים — summary.csv מוכן | ⏱️ זמן כולל: {total_end - total_start:.2f} שניות")
+    print(f"📊 סך הכול קומבינציות שנשמרו: {saved}")
+
 if __name__ == "__main__":
-    run_polars_summary()
-
-    print("== שלב 2: חישובי summary עם צ'אנקים ומקביליות ==")
-    start = time.perf_counter()
-
-    summary = pd.read_csv('signals_summary_by_conditions.csv')
-    for col in condition_cols + ['PnL_%']:
-        if col in summary.columns:
-            summary[col] = pd.to_numeric(summary[col], errors='coerce')
-
-    stats_cols = [
-        'Hour_Trade', 'Days_Trade', 'Avg_Trade_Duration_hours',
-        'Pnl_TP_per_deal', 'Pnl_SL_per_deal', 'Max_Drawdown',
-        'Max_Consecutive_Losses', 'Win_Streaks', '%_Outliers',
-        'Expectancy', 'Profit_Factor', 'Sharpe_Ratio',
-        'MAX_Exposure', 'MIN_Exposure'
-    ]
-    for col in stats_cols:
-        summary[col] = pd.Series(dtype="object")
-
-    with ProcessPoolExecutor(max_workers=8) as executor:
-        futures = [
-            executor.submit(process_group, (idx, row), condition_cols, "PnL_%")
-            for idx, row in summary.iterrows()
-        ]
-        for f in tqdm(as_completed(futures), total=len(futures), desc="Processing summary"):
-            try:
-                idx, result = f.result()
-                for key, val in result.items():
-                    summary.at[idx, key] = val
-            except Exception as e:
-                print(f"⚠️ שגיאה בעיבוד קבוצה: {e}")
-
-    summary.to_csv("signals_summary_by_conditions_full.csv", index=False)
-    print(f"✅ סיים הכל! זמן כולל: {time.perf_counter() - start:.1f} שניות")
+    main()

@@ -79,7 +79,6 @@ def process_combo(i_combo):
 
         dft["SL"] = np.where(dft["atr"] > 0, dft["close"] - atr_mult * dft["atr"], np.nan)
         dft["TP"] = np.where(dft["atr"] > 0, dft["close"] + atr_mult * rr_ratio * dft["atr"], np.nan)
-
         dft["score"] = (
             (dft["close"] > dft["ema_long"]).astype(int) +
             (dft["ema_short"] > dft["ema_long"]).astype(int) +
